@@ -1,7 +1,7 @@
 import abc
 import numpy as np
 from scipy.stats import norm
-from .util import window
+from .util import window, nansafe_prod
 from .padding import get_padder
 
 
@@ -47,6 +47,7 @@ class BaseSpatialFilter():
         """
         pass
 
+
 class IdenticalFilter():
     """
     """
@@ -59,6 +60,7 @@ class IdenticalFilter():
     def fit_transform(self, seq):
         return seq
 
+
 class BoxFilter(BaseSpatialFilter):
     """Box Filtering Class.
     """
@@ -70,43 +72,61 @@ class BoxFilter(BaseSpatialFilter):
         prod = self.weight.reshape(1, -1) @ sub_seq.reshape(-1, 1)
         return prod[0, 0]
 
+
 class GaussianFilter(BaseSpatialFilter):
     """Gaussian Filtering Class.
     """
-    def __init__(self, win_size, padding="same", n_iter=1, sigma_d=None):
+    def __init__(self, win_size, padding="same", n_iter=1, sigma_d=None, min_nonnan=None):
         super(GaussianFilter, self).__init__(win_size, padding, n_iter)
         if sigma_d is None:
             sigma_d = self._suggest_sigma_d()
+        if min_nonnan is None:
+            min_nonnan = self._min_nonnan()
         self.sigma_d = sigma_d
         self.weight = norm.pdf(np.arange(win_size), loc=self.med_idx, scale=self.sigma_d)
         self.weight /= self.weight.sum()
+        self.min_nonnan = min_nonnan
 
     def _filt(self, sub_seq):
-        prod = self.weight.reshape(1, -1) @ sub_seq.reshape(-1, 1)
-        return prod[0, 0]
+        min_nonnan = self.min_nonnan
+        weight = self.weight
+        prod = nansafe_prod(min_nonnan, sub_seq, weight)
+        return prod
 
     def _suggest_sigma_d(self):
         RATIO = 4
         return self.win_size / (RATIO * 2)
 
+    def _min_nonnan(self):
+        return int(self.win_size / 2)
+
+
+
 class BilateralFilter(GaussianFilter):
     """Bilateral Filtering Class.
     """
-    def __init__(self, win_size, padding="same", n_iter=1,\
-            sigma_d=None, sigma_i=None):
-        super(BilateralFilter, self).__init__(win_size, padding, n_iter, sigma_d)
+    def __init__(self, win_size, padding="same", n_iter=1,
+                 sigma_d=None, sigma_i=None, min_nonnan=None):
+        super(BilateralFilter, self).__init__(win_size, padding, n_iter, sigma_d, min_nonnan)
         self.sigma_i = sigma_i
 
     def _filt(self, sub_seq):
         if self.sigma_i is None:
             self.sigma_i = self._suggest_sigma_i()
 
-        w = norm.pdf(sub_seq, loc=sub_seq[self.med_idx], scale=self.sigma_i)
+        # Undefined how to define the intensity gaussian if the middle point is nan
+        loc = sub_seq[self.med_idx]
+        if np.isnan(loc):
+            return np.nan
+        w = norm.pdf(sub_seq, loc=loc, scale=self.sigma_i)
         weight = self.weight * w
-        weight /= weight.sum()
+        weight /= np.nansum(weight)
 
-        prod = weight.reshape(1, -1) @ sub_seq.reshape(-1, 1)
-        return prod[0, 0]
+        min_nonnan = self.min_nonnan
+        prod = nansafe_prod(min_nonnan, sub_seq, weight)
+
+        # prod = weight.reshape(1, -1) @ sub_seq.reshape(-1, 1)
+        return prod
 
     def _suggest_sigma_i(self):
         """Suggest sigma param.
@@ -115,6 +135,7 @@ class BilateralFilter(GaussianFilter):
         x = self.seq_
         # 1% of total range
         return (x.max() - x.min()) / 100.0
+
 
 class NonLocalMeanFilter(BaseSpatialFilter):
     """NonLocalMeanFilter Class.
@@ -165,6 +186,7 @@ class NonLocalMeanFilter(BaseSpatialFilter):
         max_val = sub_seq.max()
         min_val = sub_seq.min()
         return self.delta * (max_val - min_val) * self.win_size
+
 
 class ChainFilter():
     def __init__(self, filters, keep_intermediate=False):
